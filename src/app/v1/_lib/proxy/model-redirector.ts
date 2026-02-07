@@ -2,6 +2,79 @@ import { logger } from "@/lib/logger";
 import type { Provider } from "@/types/provider";
 import type { ProxySession } from "./session";
 
+type RedirectMatchType = "exact" | "wildcard" | "regex";
+
+type ModelRedirectMatch = {
+  redirectedModel: string;
+  matchedPattern: string;
+  matchType: RedirectMatchType;
+};
+
+function parseRegexPattern(pattern: string): RegExp | null {
+  if (!pattern.startsWith("/")) {
+    return null;
+  }
+  const lastSlashIndex = pattern.lastIndexOf("/");
+  if (lastSlashIndex <= 0) {
+    return null;
+  }
+  const body = pattern.slice(1, lastSlashIndex);
+  const flags = pattern.slice(lastSlashIndex + 1);
+  if (!body) {
+    return null;
+  }
+  try {
+    return new RegExp(body, flags);
+  } catch {
+    return null;
+  }
+}
+
+function escapeRegex(input: string): string {
+  return input.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function buildWildcardRegex(pattern: string): RegExp | null {
+  if (!pattern.includes("*")) {
+    return null;
+  }
+  const escaped = escapeRegex(pattern);
+  const wildcard = escaped.replace(/\\\*/g, ".*");
+  return new RegExp(`^${wildcard}$`);
+}
+
+function findRedirectMatch(
+  modelRedirects: Record<string, string>,
+  originalModel: string
+): ModelRedirectMatch | null {
+  const direct = modelRedirects[originalModel];
+  if (direct) {
+    return {
+      redirectedModel: direct,
+      matchedPattern: originalModel,
+      matchType: "exact",
+    };
+  }
+
+  for (const [pattern, redirectedModel] of Object.entries(modelRedirects)) {
+    if (!pattern || pattern === originalModel) {
+      continue;
+    }
+
+    const regexPattern = parseRegexPattern(pattern);
+    if (regexPattern && regexPattern.test(originalModel)) {
+      return { redirectedModel, matchedPattern: pattern, matchType: "regex" };
+    }
+
+    const wildcardRegex = buildWildcardRegex(pattern);
+    if (wildcardRegex && wildcardRegex.test(originalModel)) {
+      return { redirectedModel, matchedPattern: pattern, matchType: "wildcard" };
+    }
+  }
+
+  return null;
+}
+
 /**
  * 模型重定向器
  *
@@ -41,8 +114,8 @@ export class ModelRedirector {
     }
 
     // 检查是否有该模型的重定向配置
-    const redirectedModel = provider.modelRedirects[originalModel];
-    if (!redirectedModel) {
+    const match = findRedirectMatch(provider.modelRedirects, originalModel);
+    if (!match) {
       // 如果新供应商对此模型没有重定向规则，且之前发生过重定向，需要重置
       if (session.isModelRedirected()) {
         ModelRedirector.resetToOriginal(session, originalModel, provider);
@@ -55,11 +128,14 @@ export class ModelRedirector {
       }
       return false;
     }
+    const { redirectedModel, matchedPattern, matchType } = match;
 
     // 执行重定向
     logger.info("[ModelRedirector] Model redirected", {
       originalModel,
       redirectedModel,
+      matchedPattern,
+      matchType,
       providerId: provider.id,
       providerName: provider.name,
       providerType: provider.providerType,
@@ -91,6 +167,8 @@ export class ModelRedirector {
           newPath,
           originalModel,
           redirectedModel,
+          matchedPattern,
+          matchType,
         });
       }
     }
@@ -117,11 +195,15 @@ export class ModelRedirector {
         originalModel: originalModel,
         redirectedModel: redirectedModel,
         billingModel: originalModel, // 始终使用原始模型计费
+        matchedPattern,
+        matchType,
       };
       logger.debug("[ModelRedirector] Added modelRedirect to provider chain", {
         providerId: provider.id,
         originalModel,
         redirectedModel,
+        matchedPattern,
+        matchType,
       });
     }
 
@@ -140,7 +222,8 @@ export class ModelRedirector {
       return originalModel;
     }
 
-    return provider.modelRedirects[originalModel] || originalModel;
+    const match = findRedirectMatch(provider.modelRedirects, originalModel);
+    return match?.redirectedModel || originalModel;
   }
 
   /**
@@ -151,7 +234,10 @@ export class ModelRedirector {
    * @returns 是否配置了重定向
    */
   static hasRedirect(model: string, provider: Provider): boolean {
-    return !!(provider.modelRedirects && model && provider.modelRedirects[model]);
+    if (!provider.modelRedirects || !model) {
+      return false;
+    }
+    return !!findRedirectMatch(provider.modelRedirects, model);
   }
 
   /**

@@ -9,6 +9,7 @@ import { getSystemSettings } from "@/repository/system-config";
 import type { ProviderChainItem } from "@/types/message";
 import type { Provider } from "@/types/provider";
 import type { ClientFormat } from "./format-mapper";
+import { ModelRedirector } from "./model-redirector";
 import { ProxyResponses } from "./responses";
 import type { ProxySession } from "./session";
 
@@ -125,7 +126,10 @@ function providerSupportsModel(provider: Provider, requestedModel: string): bool
         return true;
       }
       // 检查白名单
-      return provider.allowedModels.includes(requestedModel);
+      return (
+        provider.allowedModels.includes(requestedModel) ||
+        ModelRedirector.hasRedirect(requestedModel, provider)
+      );
     }
 
     // 1b. 非 Anthropic 提供商不支持 Claude 模型调度
@@ -137,7 +141,8 @@ function providerSupportsModel(provider: Provider, requestedModel: string): bool
   // 原因：允许 Claude 类型供应商通过 allowedModels/modelRedirects 声明支持非 Claude 模型
   // 场景：Claude 供应商配置模型重定向，将 gemini-* 请求转发到真实的 Gemini 上游
   const explicitlyDeclared = !!(
-    provider.allowedModels?.includes(requestedModel) || provider.modelRedirects?.[requestedModel]
+    provider.allowedModels?.includes(requestedModel) ||
+    ModelRedirector.hasRedirect(requestedModel, provider)
   );
 
   if (explicitlyDeclared) {
